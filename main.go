@@ -72,9 +72,15 @@ func fatal(format string, args ...any) {
 }
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "insert" {
-		cmdInsert(os.Args[2:])
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "insert":
+			cmdInsert(os.Args[2:])
+			return
+		case "upsert":
+			cmdUpsert(os.Args[2:])
+			return
+		}
 	}
 	cmdQuery()
 }
@@ -87,7 +93,8 @@ func cmdQuery() {
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stdout, "Usage: mmysql [options] <query>\n\n")
 		fmt.Fprintf(os.Stdout, "Commands:\n")
-		fmt.Fprintf(os.Stdout, "  insert    Insert JSON data into a table\n\n")
+		fmt.Fprintf(os.Stdout, "  insert    Insert JSON data into a table\n")
+		fmt.Fprintf(os.Stdout, "  upsert    Insert or update JSON data in a table\n\n")
 		fmt.Fprintf(os.Stdout, "Options:\n")
 		fmt.Fprintln(os.Stdout, connFlagsUsage())
 	}
@@ -194,32 +201,14 @@ func interpolateSQL(query string, vals []any) string {
 	return b.String()
 }
 
-func cmdInsert(args []string) {
-	fs := flag.NewFlagSet("mmysql insert", flag.ExitOnError)
-	fs.SetOutput(os.Stdout)
-	var opts connOpts
-	addConnFlags(fs, &opts)
-	var ignore, dryRun bool
-	fs.BoolVar(&ignore, "ignore", false, "")
-	fs.BoolVar(&ignore, "I", false, "")
-	fs.BoolVar(&dryRun, "dry-run", false, "")
-	fs.BoolVar(&dryRun, "n", false, "")
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stdout, "Usage: mmysql insert [options] <table> [json]\n\n")
-		fmt.Fprintf(os.Stdout, "Options:\n")
-		fmt.Fprintln(os.Stdout, connFlagsUsage())
-		fmt.Fprintf(os.Stdout, "  -I, --ignore     Use INSERT IGNORE\n")
-		fmt.Fprintf(os.Stdout, "  -n, --dry-run    Print SQL without executing\n")
+// parseJSONRows reads a table name and JSON data from args/stdin,
+// returning the table name and parsed rows.
+func parseTableAndJSON(cmdName string, args []string) (string, []map[string]any) {
+	if len(args) == 0 {
+		fatal("table name required\nusage: mmysql %s [options] <table> [json]", cmdName)
 	}
-	fs.Parse(args)
-	opts.applyEnv()
-
-	remaining := fs.Args()
-	if len(remaining) == 0 {
-		fatal("table name required\nusage: mmysql insert [options] <table> [json]")
-	}
-	table := remaining[0]
-	remaining = remaining[1:]
+	table := args[0]
+	remaining := args[1:]
 
 	var jsonData string
 	if len(remaining) > 0 {
@@ -228,8 +217,8 @@ func cmdInsert(args []string) {
 		fi, _ := os.Stdin.Stat()
 		if fi.Mode()&os.ModeCharDevice != 0 {
 			fmt.Fprintln(os.Stderr, "error: no JSON data provided and stdin is a terminal")
-			fmt.Fprintln(os.Stderr, "usage: mmysql insert [options] <table> [json]")
-			fmt.Fprintln(os.Stderr, "       echo '{\"col\":\"val\"}' | mmysql insert [options] <table>")
+			fmt.Fprintf(os.Stderr, "usage: mmysql %s [options] <table> [json]\n", cmdName)
+			fmt.Fprintf(os.Stderr, "       echo '{\"col\":\"val\"}' | mmysql %s [options] <table>\n", cmdName)
 			os.Exit(1)
 		}
 		b, err := io.ReadAll(os.Stdin)
@@ -242,7 +231,6 @@ func cmdInsert(args []string) {
 		}
 	}
 
-	// Parse JSON: accept single object or array of objects
 	var rows []map[string]any
 	jsonData = strings.TrimSpace(jsonData)
 	if strings.HasPrefix(jsonData, "[") {
@@ -263,7 +251,17 @@ func cmdInsert(args []string) {
 		fatal("no rows to insert")
 	}
 
-	// Group rows by their sorted key set
+	return table, rows
+}
+
+type stmtInfo struct {
+	sql  string
+	vals []any
+}
+
+func buildStatements(table string, rows []map[string]any, ignore bool, upsert bool) []stmtInfo {
+	const chunkSize = 1000
+
 	type keyGroup struct {
 		cols []string
 		rows []map[string]any
@@ -284,13 +282,6 @@ func cmdInsert(args []string) {
 		groups[key].rows = append(groups[key].rows, row)
 	}
 
-	const chunkSize = 1000
-
-	// Build all statements and their parameter values
-	type stmtInfo struct {
-		sql  string
-		vals []any
-	}
 	var stmts []stmtInfo
 
 	for _, key := range groupOrder {
@@ -306,6 +297,15 @@ func cmdInsert(args []string) {
 		}
 		placeholderRow := "(" + strings.Repeat("?, ", len(g.cols)-1) + "?)"
 
+		var upsertClause string
+		if upsert {
+			updates := make([]string, len(g.cols))
+			for j, c := range quotedCols {
+				updates[j] = fmt.Sprintf("%s=VALUES(%s)", c, c)
+			}
+			upsertClause = " ON DUPLICATE KEY UPDATE " + strings.Join(updates, ", ")
+		}
+
 		for i := 0; i < len(g.rows); i += chunkSize {
 			end := i + chunkSize
 			if end > len(g.rows) {
@@ -318,10 +318,11 @@ func cmdInsert(args []string) {
 				allPlaceholders[j] = placeholderRow
 			}
 
-			stmt := fmt.Sprintf("%s INTO `%s` (%s) VALUES %s",
+			stmt := fmt.Sprintf("%s INTO `%s` (%s) VALUES %s%s",
 				insertKw, table,
 				strings.Join(quotedCols, ", "),
-				strings.Join(allPlaceholders, ", "))
+				strings.Join(allPlaceholders, ", "),
+				upsertClause)
 
 			vals := make([]any, 0, len(chunk)*len(g.cols))
 			for _, row := range chunk {
@@ -334,6 +335,10 @@ func cmdInsert(args []string) {
 		}
 	}
 
+	return stmts
+}
+
+func execStatements(opts *connOpts, stmts []stmtInfo, dryRun bool) {
 	if dryRun {
 		for _, s := range stmts {
 			fmt.Printf("%s;\n", interpolateSQL(s.sql, s.vals))
@@ -370,4 +375,51 @@ func cmdInsert(args []string) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	enc.Encode(map[string]any{"rows_affected": totalAffected})
+}
+
+func cmdInsert(args []string) {
+	fs := flag.NewFlagSet("mmysql insert", flag.ExitOnError)
+	fs.SetOutput(os.Stdout)
+	var opts connOpts
+	addConnFlags(fs, &opts)
+	var ignore, dryRun bool
+	fs.BoolVar(&ignore, "ignore", false, "")
+	fs.BoolVar(&ignore, "I", false, "")
+	fs.BoolVar(&dryRun, "dry-run", false, "")
+	fs.BoolVar(&dryRun, "n", false, "")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stdout, "Usage: mmysql insert [options] <table> [json]\n\n")
+		fmt.Fprintf(os.Stdout, "Options:\n")
+		fmt.Fprintln(os.Stdout, connFlagsUsage())
+		fmt.Fprintf(os.Stdout, "  -I, --ignore     Use INSERT IGNORE\n")
+		fmt.Fprintf(os.Stdout, "  -n, --dry-run    Print SQL without executing\n")
+	}
+	fs.Parse(args)
+	opts.applyEnv()
+
+	table, rows := parseTableAndJSON("insert", fs.Args())
+	stmts := buildStatements(table, rows, ignore, false)
+	execStatements(&opts, stmts, dryRun)
+}
+
+func cmdUpsert(args []string) {
+	fs := flag.NewFlagSet("mmysql upsert", flag.ExitOnError)
+	fs.SetOutput(os.Stdout)
+	var opts connOpts
+	addConnFlags(fs, &opts)
+	var dryRun bool
+	fs.BoolVar(&dryRun, "dry-run", false, "")
+	fs.BoolVar(&dryRun, "n", false, "")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stdout, "Usage: mmysql upsert [options] <table> [json]\n\n")
+		fmt.Fprintf(os.Stdout, "Options:\n")
+		fmt.Fprintln(os.Stdout, connFlagsUsage())
+		fmt.Fprintf(os.Stdout, "  -n, --dry-run    Print SQL without executing\n")
+	}
+	fs.Parse(args)
+	opts.applyEnv()
+
+	table, rows := parseTableAndJSON("upsert", fs.Args())
+	stmts := buildStatements(table, rows, false, true)
+	execStatements(&opts, stmts, dryRun)
 }
