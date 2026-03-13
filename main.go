@@ -7,46 +7,94 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	_ "github.com/go-sql-driver/mysql"
 )
 
-func main() {
-	flag.CommandLine.SetOutput(os.Stdout)
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stdout, "Usage: mmysql [options] <query>\n\n")
-		fmt.Fprintf(os.Stdout, "Options:\n")
-		fmt.Fprintf(os.Stdout, "  -u, --user       MySQL user (default: $MMYSQLUSER)\n")
-		fmt.Fprintf(os.Stdout, "  -p, --password   MySQL password (default: $MMYSQLPASSWORD)\n")
-		fmt.Fprintf(os.Stdout, "  -H, --host       MySQL host (default: $MMYSQLHOST)\n")
-		fmt.Fprintf(os.Stdout, "  -d, --database   MySQL database (default: $MMYSQLDATABASE)\n")
-	}
-	var user, password, host, database string
-	flag.StringVar(&user, "user", "", "")
-	flag.StringVar(&user, "u", "", "")
-	flag.StringVar(&password, "password", "", "")
-	flag.StringVar(&password, "p", "", "")
-	flag.StringVar(&host, "host", "", "")
-	flag.StringVar(&host, "H", "", "")
-	flag.StringVar(&database, "database", "", "")
-	flag.StringVar(&database, "d", "", "")
-	flag.Parse()
+type connOpts struct {
+	user     string
+	password string
+	host     string
+	database string
+}
 
-	if user == "" {
-		user = os.Getenv("MMYSQLUSER")
+func addConnFlags(fs *flag.FlagSet, opts *connOpts) {
+	fs.StringVar(&opts.user, "user", "", "")
+	fs.StringVar(&opts.user, "u", "", "")
+	fs.StringVar(&opts.password, "password", "", "")
+	fs.StringVar(&opts.password, "p", "", "")
+	fs.StringVar(&opts.host, "host", "", "")
+	fs.StringVar(&opts.host, "H", "", "")
+	fs.StringVar(&opts.database, "database", "", "")
+	fs.StringVar(&opts.database, "d", "", "")
+}
+
+func (o *connOpts) applyEnv() {
+	if o.user == "" {
+		o.user = os.Getenv("MMYSQLUSER")
 	}
-	if password == "" {
-		password = os.Getenv("MMYSQLPASSWORD")
+	if o.password == "" {
+		o.password = os.Getenv("MMYSQLPASSWORD")
 	}
+	if o.host == "" {
+		o.host = os.Getenv("MMYSQLHOST")
+	}
+	if o.database == "" {
+		o.database = os.Getenv("MMYSQLDATABASE")
+	}
+}
+
+func (o *connOpts) open() (*sql.DB, error) {
+	host := o.host
 	if host == "" {
-		host = os.Getenv("MMYSQLHOST")
+		host = "localhost"
 	}
-	if database == "" {
-		database = os.Getenv("MMYSQLDATABASE")
+	if !strings.Contains(host, ":") {
+		host = host + ":3306"
 	}
+	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?charset=utf8mb4&collation=utf8mb4_unicode_ci&parseTime=true",
+		o.user, o.password, host, o.database)
+	return sql.Open("mysql", dsn)
+}
 
-	query := strings.Join(flag.Args(), " ")
+func connFlagsUsage() string {
+	return `  -u, --user       MySQL user (default: $MMYSQLUSER)
+  -p, --password   MySQL password (default: $MMYSQLPASSWORD)
+  -H, --host       MySQL host (default: $MMYSQLHOST)
+  -d, --database   MySQL database (default: $MMYSQLDATABASE)`
+}
+
+func fatal(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
+	os.Exit(1)
+}
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "insert" {
+		cmdInsert(os.Args[2:])
+		return
+	}
+	cmdQuery()
+}
+
+func cmdQuery() {
+	fs := flag.NewFlagSet("mmysql", flag.ExitOnError)
+	fs.SetOutput(os.Stdout)
+	var opts connOpts
+	addConnFlags(fs, &opts)
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stdout, "Usage: mmysql [options] <query>\n\n")
+		fmt.Fprintf(os.Stdout, "Commands:\n")
+		fmt.Fprintf(os.Stdout, "  insert    Insert JSON data into a table\n\n")
+		fmt.Fprintf(os.Stdout, "Options:\n")
+		fmt.Fprintln(os.Stdout, connFlagsUsage())
+	}
+	fs.Parse(os.Args[1:])
+	opts.applyEnv()
+
+	query := strings.Join(fs.Args(), " ")
 	if query == "" {
 		fi, _ := os.Stdin.Stat()
 		if fi.Mode()&os.ModeCharDevice != 0 {
@@ -57,44 +105,29 @@ func main() {
 		}
 		b, err := io.ReadAll(os.Stdin)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error reading stdin: %v\n", err)
-			os.Exit(1)
+			fatal("reading stdin: %v", err)
 		}
 		query = strings.TrimSpace(string(b))
 		if query == "" {
-			fmt.Fprintln(os.Stderr, "error: empty query from stdin")
-			os.Exit(1)
+			fatal("empty query from stdin")
 		}
 	}
 
-	if host == "" {
-		host = "localhost"
-	}
-	if !strings.Contains(host, ":") {
-		host = host + ":3306"
-	}
-
-	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?charset=utf8mb4&collation=utf8mb4_unicode_ci&parseTime=true",
-		user, password, host, database)
-
-	db, err := sql.Open("mysql", dsn)
+	db, err := opts.open()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		fatal("%v", err)
 	}
 	defer db.Close()
 
 	rows, err := db.Query(query)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		fatal("%v", err)
 	}
 	defer rows.Close()
 
 	columns, err := rows.Columns()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		fatal("%v", err)
 	}
 
 	var results []map[string]any
@@ -105,8 +138,7 @@ func main() {
 			ptrs[i] = &values[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			fatal("%v", err)
 		}
 		row := make(map[string]any, len(columns))
 		for i, col := range columns {
@@ -120,14 +152,222 @@ func main() {
 		results = append(results, row)
 	}
 	if err := rows.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		fatal("%v", err)
 	}
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(results); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		fatal("%v", err)
 	}
+}
+
+func interpolateSQL(query string, vals []any) string {
+	var b strings.Builder
+	vi := 0
+	for i := 0; i < len(query); i++ {
+		if query[i] == '?' && vi < len(vals) {
+			v := vals[vi]
+			vi++
+			switch val := v.(type) {
+			case nil:
+				b.WriteString("NULL")
+			case string:
+				b.WriteByte('\'')
+				b.WriteString(strings.ReplaceAll(strings.ReplaceAll(val, `\`, `\\`), `'`, `\'`))
+				b.WriteByte('\'')
+			case float64:
+				b.WriteString(fmt.Sprintf("%v", val))
+			case bool:
+				if val {
+					b.WriteString("1")
+				} else {
+					b.WriteString("0")
+				}
+			default:
+				b.WriteString(fmt.Sprintf("'%v'", val))
+			}
+		} else {
+			b.WriteByte(query[i])
+		}
+	}
+	return b.String()
+}
+
+func cmdInsert(args []string) {
+	fs := flag.NewFlagSet("mmysql insert", flag.ExitOnError)
+	fs.SetOutput(os.Stdout)
+	var opts connOpts
+	addConnFlags(fs, &opts)
+	var ignore, dryRun bool
+	fs.BoolVar(&ignore, "ignore", false, "")
+	fs.BoolVar(&ignore, "I", false, "")
+	fs.BoolVar(&dryRun, "dry-run", false, "")
+	fs.BoolVar(&dryRun, "n", false, "")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stdout, "Usage: mmysql insert [options] <table> [json]\n\n")
+		fmt.Fprintf(os.Stdout, "Options:\n")
+		fmt.Fprintln(os.Stdout, connFlagsUsage())
+		fmt.Fprintf(os.Stdout, "  -I, --ignore     Use INSERT IGNORE\n")
+		fmt.Fprintf(os.Stdout, "  -n, --dry-run    Print SQL without executing\n")
+	}
+	fs.Parse(args)
+	opts.applyEnv()
+
+	remaining := fs.Args()
+	if len(remaining) == 0 {
+		fatal("table name required\nusage: mmysql insert [options] <table> [json]")
+	}
+	table := remaining[0]
+	remaining = remaining[1:]
+
+	var jsonData string
+	if len(remaining) > 0 {
+		jsonData = strings.Join(remaining, " ")
+	} else {
+		fi, _ := os.Stdin.Stat()
+		if fi.Mode()&os.ModeCharDevice != 0 {
+			fmt.Fprintln(os.Stderr, "error: no JSON data provided and stdin is a terminal")
+			fmt.Fprintln(os.Stderr, "usage: mmysql insert [options] <table> [json]")
+			fmt.Fprintln(os.Stderr, "       echo '{\"col\":\"val\"}' | mmysql insert [options] <table>")
+			os.Exit(1)
+		}
+		b, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fatal("reading stdin: %v", err)
+		}
+		jsonData = strings.TrimSpace(string(b))
+		if jsonData == "" {
+			fatal("empty JSON from stdin")
+		}
+	}
+
+	// Parse JSON: accept single object or array of objects
+	var rows []map[string]any
+	jsonData = strings.TrimSpace(jsonData)
+	if strings.HasPrefix(jsonData, "[") {
+		if err := json.Unmarshal([]byte(jsonData), &rows); err != nil {
+			fatal("invalid JSON array: %v", err)
+		}
+	} else if strings.HasPrefix(jsonData, "{") {
+		var single map[string]any
+		if err := json.Unmarshal([]byte(jsonData), &single); err != nil {
+			fatal("invalid JSON object: %v", err)
+		}
+		rows = []map[string]any{single}
+	} else {
+		fatal("JSON must be an object or array of objects")
+	}
+
+	if len(rows) == 0 {
+		fatal("no rows to insert")
+	}
+
+	// Group rows by their sorted key set
+	type keyGroup struct {
+		cols []string
+		rows []map[string]any
+	}
+	groups := make(map[string]*keyGroup)
+	var groupOrder []string
+	for _, row := range rows {
+		cols := make([]string, 0, len(row))
+		for k := range row {
+			cols = append(cols, k)
+		}
+		sort.Strings(cols)
+		key := strings.Join(cols, "\x00")
+		if _, ok := groups[key]; !ok {
+			groups[key] = &keyGroup{cols: cols}
+			groupOrder = append(groupOrder, key)
+		}
+		groups[key].rows = append(groups[key].rows, row)
+	}
+
+	const chunkSize = 1000
+
+	// Build all statements and their parameter values
+	type stmtInfo struct {
+		sql  string
+		vals []any
+	}
+	var stmts []stmtInfo
+
+	for _, key := range groupOrder {
+		g := groups[key]
+		insertKw := "INSERT"
+		if ignore {
+			insertKw = "INSERT IGNORE"
+		}
+
+		quotedCols := make([]string, len(g.cols))
+		for j, c := range g.cols {
+			quotedCols[j] = "`" + c + "`"
+		}
+		placeholderRow := "(" + strings.Repeat("?, ", len(g.cols)-1) + "?)"
+
+		for i := 0; i < len(g.rows); i += chunkSize {
+			end := i + chunkSize
+			if end > len(g.rows) {
+				end = len(g.rows)
+			}
+			chunk := g.rows[i:end]
+
+			allPlaceholders := make([]string, len(chunk))
+			for j := range chunk {
+				allPlaceholders[j] = placeholderRow
+			}
+
+			stmt := fmt.Sprintf("%s INTO `%s` (%s) VALUES %s",
+				insertKw, table,
+				strings.Join(quotedCols, ", "),
+				strings.Join(allPlaceholders, ", "))
+
+			vals := make([]any, 0, len(chunk)*len(g.cols))
+			for _, row := range chunk {
+				for _, c := range g.cols {
+					vals = append(vals, row[c])
+				}
+			}
+
+			stmts = append(stmts, stmtInfo{sql: stmt, vals: vals})
+		}
+	}
+
+	if dryRun {
+		for _, s := range stmts {
+			fmt.Printf("%s;\n", interpolateSQL(s.sql, s.vals))
+		}
+		return
+	}
+
+	db, err := opts.open()
+	if err != nil {
+		fatal("%v", err)
+	}
+	defer db.Close()
+
+	tx, err := db.Begin()
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	var totalAffected int64
+	for _, s := range stmts {
+		result, err := tx.Exec(s.sql, s.vals...)
+		if err != nil {
+			tx.Rollback()
+			fatal("%v", err)
+		}
+		affected, _ := result.RowsAffected()
+		totalAffected += affected
+	}
+
+	if err := tx.Commit(); err != nil {
+		fatal("%v", err)
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	enc.Encode(map[string]any{"rows_affected": totalAffected})
 }

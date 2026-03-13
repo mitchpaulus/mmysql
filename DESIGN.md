@@ -8,3 +8,4 @@ Design considerations:
   - $MMYSQLDATABASE
 - Assume UTF-8 by default for everything
 - Target Linux and Windows.
+- When executing, everything should also be wrapped into a single transaction.
