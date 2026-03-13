@@ -263,6 +263,13 @@ type stmtInfo struct {
 	vals []any
 }
 
+func quoteTable(name string) string {
+	if i := strings.IndexByte(name, '.'); i >= 0 {
+		return "`" + name[:i] + "`.`" + name[i+1:] + "`"
+	}
+	return "`" + name + "`"
+}
+
 func buildStatements(table string, rows []map[string]any, ignore bool, upsert bool) []stmtInfo {
 	const chunkSize = 1000
 
@@ -322,8 +329,8 @@ func buildStatements(table string, rows []map[string]any, ignore bool, upsert bo
 				allPlaceholders[j] = placeholderRow
 			}
 
-			stmt := fmt.Sprintf("%s INTO `%s` (%s) VALUES %s%s",
-				insertKw, table,
+			stmt := fmt.Sprintf("%s INTO %s (%s) VALUES %s%s",
+				insertKw, quoteTable(table),
 				strings.Join(quotedCols, ", "),
 				strings.Join(allPlaceholders, ", "),
 				upsertClause)
@@ -488,7 +495,7 @@ func buildUpdateStatements(table string, keys []string, whereSQL string, wherePa
 			where = "(" + where + ") AND (" + whereSQL + ")"
 		}
 
-		stmt := fmt.Sprintf("UPDATE `%s` SET %s WHERE %s", table, strings.Join(setParts, ", "), where)
+		stmt := fmt.Sprintf("UPDATE %s SET %s WHERE %s", quoteTable(table), strings.Join(setParts, ", "), where)
 		stmts = append(stmts, stmtInfo{sql: stmt, vals: vals})
 	}
 	return stmts, nil
