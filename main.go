@@ -80,6 +80,9 @@ func main() {
 		case "upsert":
 			cmdUpsert(os.Args[2:])
 			return
+		case "update":
+			cmdUpdate(os.Args[2:])
+			return
 		}
 	}
 	cmdQuery()
@@ -94,7 +97,8 @@ func cmdQuery() {
 		fmt.Fprintf(os.Stdout, "Usage: mmysql [options] <query>\n\n")
 		fmt.Fprintf(os.Stdout, "Commands:\n")
 		fmt.Fprintf(os.Stdout, "  insert    Insert JSON data into a table\n")
-		fmt.Fprintf(os.Stdout, "  upsert    Insert or update JSON data in a table\n\n")
+		fmt.Fprintf(os.Stdout, "  upsert    Insert or update JSON data in a table\n")
+		fmt.Fprintf(os.Stdout, "  update    Update rows matching key columns\n\n")
 		fmt.Fprintf(os.Stdout, "Options:\n")
 		fmt.Fprintln(os.Stdout, connFlagsUsage())
 	}
@@ -399,6 +403,136 @@ func cmdInsert(args []string) {
 
 	table, rows := parseTableAndJSON("insert", fs.Args())
 	stmts := buildStatements(table, rows, ignore, false)
+	execStatements(&opts, stmts, dryRun)
+}
+
+type stringSlice []string
+
+func (s *stringSlice) String() string { return strings.Join(*s, ", ") }
+func (s *stringSlice) Set(val string) error {
+	*s = append(*s, val)
+	return nil
+}
+
+func parseWhere(expr string) (string, []string) {
+	var buf strings.Builder
+	var paramCols []string
+	for i := 0; i < len(expr); i++ {
+		if expr[i] == '~' {
+			j := i + 1
+			for j < len(expr) && (expr[j] >= 'a' && expr[j] <= 'z' || expr[j] >= 'A' && expr[j] <= 'Z' || expr[j] >= '0' && expr[j] <= '9' || expr[j] == '_') {
+				j++
+			}
+			if j > i+1 {
+				paramCols = append(paramCols, expr[i+1:j])
+				buf.WriteByte('?')
+				i = j - 1
+				continue
+			}
+		}
+		buf.WriteByte(expr[i])
+	}
+	return buf.String(), paramCols
+}
+
+func buildUpdateStatements(table string, keys []string, whereSQL string, whereParamCols []string, rows []map[string]any) ([]stmtInfo, error) {
+	keySet := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		keySet[k] = true
+	}
+
+	var stmts []stmtInfo
+	for i, row := range rows {
+		for _, k := range keys {
+			if _, ok := row[k]; !ok {
+				return nil, fmt.Errorf("row %d: missing key column %q", i, k)
+			}
+		}
+		for _, col := range whereParamCols {
+			if _, ok := row[col]; !ok {
+				return nil, fmt.Errorf("row %d: missing ~%s column referenced in --where", i, col)
+			}
+		}
+
+		setCols := make([]string, 0, len(row))
+		for col := range row {
+			if !keySet[col] {
+				setCols = append(setCols, col)
+			}
+		}
+		sort.Strings(setCols)
+		if len(setCols) == 0 {
+			return nil, fmt.Errorf("row %d: no columns to SET (all columns are keys)", i)
+		}
+
+		setParts := make([]string, len(setCols))
+		vals := make([]any, 0, len(setCols)+len(keys)+len(whereParamCols))
+		for j, col := range setCols {
+			setParts[j] = "`" + col + "` = ?"
+			vals = append(vals, row[col])
+		}
+		for _, k := range keys {
+			vals = append(vals, row[k])
+		}
+
+		whereParts := make([]string, len(keys))
+		for j, k := range keys {
+			whereParts[j] = "`" + k + "` = ?"
+		}
+		where := strings.Join(whereParts, " AND ")
+
+		if whereSQL != "" {
+			for _, col := range whereParamCols {
+				vals = append(vals, row[col])
+			}
+			where = "(" + where + ") AND (" + whereSQL + ")"
+		}
+
+		stmt := fmt.Sprintf("UPDATE `%s` SET %s WHERE %s", table, strings.Join(setParts, ", "), where)
+		stmts = append(stmts, stmtInfo{sql: stmt, vals: vals})
+	}
+	return stmts, nil
+}
+
+func cmdUpdate(args []string) {
+	fs := flag.NewFlagSet("mmysql update", flag.ExitOnError)
+	fs.SetOutput(os.Stdout)
+	var opts connOpts
+	addConnFlags(fs, &opts)
+	var dryRun bool
+	var keys stringSlice
+	var whereExpr string
+	fs.BoolVar(&dryRun, "dry-run", false, "")
+	fs.BoolVar(&dryRun, "n", false, "")
+	fs.Var(&keys, "k", "")
+	fs.Var(&keys, "key", "")
+	fs.StringVar(&whereExpr, "where", "", "")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stdout, "Usage: mmysql update [options] -k <key> [--where '<expr>'] <table> [json]\n\n")
+		fmt.Fprintf(os.Stdout, "Options:\n")
+		fmt.Fprintln(os.Stdout, connFlagsUsage())
+		fmt.Fprintf(os.Stdout, "  -k, --key        Key column for WHERE match (repeatable, required)\n")
+		fmt.Fprintf(os.Stdout, "      --where      Additional WHERE condition (use ~col for row values)\n")
+		fmt.Fprintf(os.Stdout, "  -n, --dry-run    Print SQL without executing\n")
+	}
+	fs.Parse(args)
+	opts.applyEnv()
+
+	if len(keys) == 0 {
+		fatal("at least one -k/--key flag is required")
+	}
+
+	var whereSQL string
+	var whereParamCols []string
+	if whereExpr != "" {
+		whereSQL, whereParamCols = parseWhere(whereExpr)
+	}
+
+	table, rows := parseTableAndJSON("update", fs.Args())
+	stmts, err := buildUpdateStatements(table, keys, whereSQL, whereParamCols, rows)
+	if err != nil {
+		fatal("%v", err)
+	}
 	execStatements(&opts, stmts, dryRun)
 }
 
