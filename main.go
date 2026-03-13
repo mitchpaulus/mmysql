@@ -13,11 +13,38 @@ import (
 )
 
 func main() {
-	user := flag.String("user", os.Getenv("MMYSQLUSER"), "MySQL user")
-	password := flag.String("password", os.Getenv("MMYSQLPASSWORD"), "MySQL password")
-	host := flag.String("host", os.Getenv("MMYSQLHOST"), "MySQL host (host:port or just host)")
-	database := flag.String("database", os.Getenv("MMYSQLDATABASE"), "MySQL database")
+	flag.CommandLine.SetOutput(os.Stdout)
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stdout, "Usage: mmysql [options] <query>\n\n")
+		fmt.Fprintf(os.Stdout, "Options:\n")
+		fmt.Fprintf(os.Stdout, "  -u, --user       MySQL user (default: $MMYSQLUSER)\n")
+		fmt.Fprintf(os.Stdout, "  -p, --password   MySQL password (default: $MMYSQLPASSWORD)\n")
+		fmt.Fprintf(os.Stdout, "  -H, --host       MySQL host (default: $MMYSQLHOST)\n")
+		fmt.Fprintf(os.Stdout, "  -d, --database   MySQL database (default: $MMYSQLDATABASE)\n")
+	}
+	var user, password, host, database string
+	flag.StringVar(&user, "user", "", "")
+	flag.StringVar(&user, "u", "", "")
+	flag.StringVar(&password, "password", "", "")
+	flag.StringVar(&password, "p", "", "")
+	flag.StringVar(&host, "host", "", "")
+	flag.StringVar(&host, "H", "", "")
+	flag.StringVar(&database, "database", "", "")
+	flag.StringVar(&database, "d", "", "")
 	flag.Parse()
+
+	if user == "" {
+		user = os.Getenv("MMYSQLUSER")
+	}
+	if password == "" {
+		password = os.Getenv("MMYSQLPASSWORD")
+	}
+	if host == "" {
+		host = os.Getenv("MMYSQLHOST")
+	}
+	if database == "" {
+		database = os.Getenv("MMYSQLDATABASE")
+	}
 
 	query := strings.Join(flag.Args(), " ")
 	if query == "" {
@@ -40,15 +67,15 @@ func main() {
 		}
 	}
 
-	if *host == "" {
-		*host = "localhost"
+	if host == "" {
+		host = "localhost"
 	}
-	if !strings.Contains(*host, ":") {
-		*host = *host + ":3306"
+	if !strings.Contains(host, ":") {
+		host = host + ":3306"
 	}
 
 	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?charset=utf8mb4&collation=utf8mb4_unicode_ci&parseTime=true",
-		*user, *password, *host, *database)
+		user, password, host, database)
 
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
