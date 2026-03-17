@@ -209,7 +209,7 @@ func interpolateSQL(query string, vals []any) string {
 // returning the table name and parsed rows.
 func parseTableAndJSON(cmdName string, args []string) (string, []map[string]any) {
 	if len(args) == 0 {
-		fatal("table name required\nusage: mmysql %s [options] <table> [json]", cmdName)
+		fatal("table name required\nusage: mmysql %s [options] <table> [json string]", cmdName)
 	}
 	table := args[0]
 	remaining := args[1:]
@@ -221,7 +221,7 @@ func parseTableAndJSON(cmdName string, args []string) (string, []map[string]any)
 		fi, _ := os.Stdin.Stat()
 		if fi.Mode()&os.ModeCharDevice != 0 {
 			fmt.Fprintln(os.Stderr, "error: no JSON data provided and stdin is a terminal")
-			fmt.Fprintf(os.Stderr, "usage: mmysql %s [options] <table> [json]\n", cmdName)
+			fmt.Fprintf(os.Stderr, "usage: mmysql %s [options] <table> [json string]\n", cmdName)
 			fmt.Fprintf(os.Stderr, "       echo '{\"col\":\"val\"}' | mmysql %s [options] <table>\n", cmdName)
 			os.Exit(1)
 		}
@@ -399,7 +399,7 @@ func cmdInsert(args []string) {
 	fs.BoolVar(&dryRun, "dry-run", false, "")
 	fs.BoolVar(&dryRun, "n", false, "")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stdout, "Usage: mmysql insert [options] <table> [json]\n\n")
+		fmt.Fprintf(os.Stdout, "Usage: mmysql insert [options] <table> [json string]\n\n")
 		fmt.Fprintf(os.Stdout, "Options:\n")
 		fmt.Fprintln(os.Stdout, connFlagsUsage())
 		fmt.Fprintf(os.Stdout, "  -I, --ignore     Use INSERT IGNORE\n")
@@ -515,7 +515,7 @@ func cmdUpdate(args []string) {
 	fs.Var(&keys, "key", "")
 	fs.StringVar(&whereExpr, "where", "", "")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stdout, "Usage: mmysql update [options] -k <key> [--where '<expr>'] <table> [json]\n\n")
+		fmt.Fprintf(os.Stdout, "Usage: mmysql update [options] -k <key> [--where '<expr>'] <table> [json string]\n\n")
 		fmt.Fprintf(os.Stdout, "Options:\n")
 		fmt.Fprintln(os.Stdout, connFlagsUsage())
 		fmt.Fprintf(os.Stdout, "  -k, --key        Key column for WHERE match (repeatable, required)\n")
@@ -552,7 +552,7 @@ func cmdUpsert(args []string) {
 	fs.BoolVar(&dryRun, "dry-run", false, "")
 	fs.BoolVar(&dryRun, "n", false, "")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stdout, "Usage: mmysql upsert [options] <table> [json]\n\n")
+		fmt.Fprintf(os.Stdout, "Usage: mmysql upsert [options] <table> [json string]\n\n")
 		fmt.Fprintf(os.Stdout, "Options:\n")
 		fmt.Fprintln(os.Stdout, connFlagsUsage())
 		fmt.Fprintf(os.Stdout, "  -n, --dry-run    Print SQL without executing\n")
