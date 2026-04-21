@@ -71,9 +71,22 @@ func fatal(format string, args ...any) {
 	os.Exit(1)
 }
 
+func printMainUsage(w io.Writer) {
+	fmt.Fprintf(w, "Usage: mmysql <command> [options]\n\n")
+	fmt.Fprintf(w, "Commands:\n")
+	fmt.Fprintf(w, "  execute   Execute a SQL query\n")
+	fmt.Fprintf(w, "  ex        Shorthand for execute\n")
+	fmt.Fprintf(w, "  insert    Insert JSON data into a table\n")
+	fmt.Fprintf(w, "  upsert    Insert or update JSON data in a table\n")
+	fmt.Fprintf(w, "  update    Update rows matching key columns\n")
+}
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "execute", "ex":
+			cmdExecute(os.Args[2:])
+			return
 		case "insert":
 			cmdInsert(os.Args[2:])
 			return
@@ -85,63 +98,55 @@ func main() {
 			return
 		}
 	}
-	cmdQuery()
+
+	printMainUsage(os.Stderr)
+	os.Exit(1)
 }
 
-func cmdQuery() {
-	fs := flag.NewFlagSet("mmysql", flag.ExitOnError)
-	fs.SetOutput(os.Stdout)
-	var opts connOpts
-	addConnFlags(fs, &opts)
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stdout, "Usage: mmysql [options] <query>\n\n")
-		fmt.Fprintf(os.Stdout, "Commands:\n")
-		fmt.Fprintf(os.Stdout, "  insert    Insert JSON data into a table\n")
-		fmt.Fprintf(os.Stdout, "  upsert    Insert or update JSON data in a table\n")
-		fmt.Fprintf(os.Stdout, "  update    Update rows matching key columns\n\n")
-		fmt.Fprintf(os.Stdout, "Options:\n")
-		fmt.Fprintln(os.Stdout, connFlagsUsage())
-	}
-	fs.Parse(os.Args[1:])
-	opts.applyEnv()
-
-	query := strings.Join(fs.Args(), " ")
-	if query == "" {
-		fi, _ := os.Stdin.Stat()
-		if fi.Mode()&os.ModeCharDevice != 0 {
-			fmt.Fprintln(os.Stderr, "error: no query provided and stdin is a terminal")
-			fmt.Fprintln(os.Stderr, "usage: mmysql [options] <query>")
-			fmt.Fprintln(os.Stderr, "       echo 'SELECT 1' | mmysql [options]")
-			os.Exit(1)
-		}
-		b, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			fatal("reading stdin: %v", err)
-		}
-		query = strings.TrimSpace(string(b))
+func readQuery(args []string, usageName string) string {
+	if len(args) > 0 {
+		query := strings.TrimSpace(strings.Join(args, " "))
 		if query == "" {
-			fatal("empty query from stdin")
+			fatal("empty query")
 		}
+		return query
 	}
 
-	db, err := opts.open()
+	fi, err := os.Stdin.Stat()
 	if err != nil {
-		fatal("%v", err)
+		fatal("checking stdin: %v", err)
 	}
-	defer db.Close()
+	if fi.Mode()&os.ModeCharDevice != 0 {
+		fmt.Fprintln(os.Stderr, "error: no query provided")
+		fmt.Fprintf(os.Stderr, "usage: mmysql %s [options] <query>\n", usageName)
+		fmt.Fprintf(os.Stderr, "       echo 'SELECT 1' | mmysql %s [options]\n", usageName)
+		os.Exit(1)
+	}
 
-	rows, err := db.Query(query)
+	b, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		fatal("%v", err)
+		fatal("reading stdin: %v", err)
+	}
+	query := strings.TrimSpace(string(b))
+	if query == "" {
+		fatal("empty query from stdin")
+	}
+	return query
+}
+
+func queryReturnsRows(tx *sql.Tx, query string) ([]map[string]any, error) {
+	rows, err := tx.Query(query)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 
 	columns, err := rows.Columns()
 	if err != nil {
-		fatal("%v", err)
+		return nil, err
 	}
 
-	var results []map[string]any
+	results := make([]map[string]any, 0)
 	for rows.Next() {
 		values := make([]any, len(columns))
 		ptrs := make([]any, len(columns))
@@ -149,7 +154,7 @@ func cmdQuery() {
 			ptrs[i] = &values[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			fatal("%v", err)
+			return nil, err
 		}
 		row := make(map[string]any, len(columns))
 		for i, col := range columns {
@@ -163,12 +168,83 @@ func cmdQuery() {
 		results = append(results, row)
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}
+
+func executeQuery(opts *connOpts, query string) any {
+	db, err := opts.open()
+	if err != nil {
 		fatal("%v", err)
+	}
+	defer db.Close()
+
+	tx, err := db.Begin()
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	results, queryErr := queryReturnsRows(tx, query)
+	if queryErr == nil {
+		if err := tx.Commit(); err != nil {
+			fatal("%v", err)
+		}
+		return results
+	}
+
+	result, execErr := tx.Exec(query)
+	if execErr != nil {
+		tx.Rollback()
+		fatal("%v", execErr)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		tx.Rollback()
+		fatal("%v", err)
+	}
+
+	response := map[string]any{"rows_affected": rowsAffected}
+	if lastInsertID, err := result.LastInsertId(); err == nil {
+		response["last_insert_id"] = lastInsertID
+	}
+
+	if err := tx.Commit(); err != nil {
+		fatal("%v", err)
+	}
+
+	return response
+}
+
+func cmdExecute(args []string) {
+	fs := flag.NewFlagSet("mmysql execute", flag.ExitOnError)
+	fs.SetOutput(os.Stdout)
+	var opts connOpts
+	addConnFlags(fs, &opts)
+	var dryRun bool
+	fs.BoolVar(&dryRun, "dry-run", false, "")
+	fs.BoolVar(&dryRun, "n", false, "")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stdout, "Usage: mmysql execute [options] <query>\n")
+		fmt.Fprintf(os.Stdout, "       mmysql ex [options] <query>\n\n")
+		fmt.Fprintf(os.Stdout, "Options:\n")
+		fmt.Fprintln(os.Stdout, connFlagsUsage())
+		fmt.Fprintf(os.Stdout, "  -n, --dry-run    Print SQL without executing\n")
+	}
+	fs.Parse(args)
+	opts.applyEnv()
+
+	query := readQuery(fs.Args(), "execute")
+	if dryRun {
+		fmt.Println(query)
+		return
 	}
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(results); err != nil {
+	if err := enc.Encode(executeQuery(&opts, query)); err != nil {
 		fatal("%v", err)
 	}
 }
