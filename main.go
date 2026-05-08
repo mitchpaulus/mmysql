@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -18,6 +19,20 @@ type connOpts struct {
 	password string
 	host     string
 	database string
+}
+
+type outputFormat string
+
+const (
+	outputJSON outputFormat = "json"
+	outputCSV  outputFormat = "csv"
+	outputTSV  outputFormat = "tsv"
+)
+
+type queryOutput struct {
+	columns   []string
+	rows      []map[string]any
+	jsonValue any
 }
 
 func addConnFlags(fs *flag.FlagSet, opts *connOpts) {
@@ -64,6 +79,29 @@ func connFlagsUsage() string {
   -p, --password   MySQL password (default: $MMYSQLPASSWORD)
   -H, --host       MySQL host (default: $MMYSQLHOST)
   -d, --database   MySQL database (default: $MMYSQLDATABASE)`
+}
+
+func addOutputFlags(fs *flag.FlagSet, csvOut *bool, tsvOut *bool) {
+	fs.BoolVar(csvOut, "csv", false, "")
+	fs.BoolVar(tsvOut, "tsv", false, "")
+}
+
+func outputFlagsUsage() string {
+	return `      --csv        Print output as CSV
+      --tsv        Print output as TSV`
+}
+
+func selectedOutputFormat(csvOut bool, tsvOut bool) outputFormat {
+	if csvOut && tsvOut {
+		fatal("--csv and --tsv cannot be used together")
+	}
+	if csvOut {
+		return outputCSV
+	}
+	if tsvOut {
+		return outputTSV
+	}
+	return outputJSON
 }
 
 func fatal(format string, args ...any) {
@@ -134,16 +172,16 @@ func readQuery(args []string, usageName string) string {
 	return query
 }
 
-func queryReturnsRows(tx *sql.Tx, query string) ([]map[string]any, error) {
+func queryReturnsRows(tx *sql.Tx, query string) (queryOutput, error) {
 	rows, err := tx.Query(query)
 	if err != nil {
-		return nil, err
+		return queryOutput{}, err
 	}
 	defer rows.Close()
 
 	columns, err := rows.Columns()
 	if err != nil {
-		return nil, err
+		return queryOutput{}, err
 	}
 
 	results := make([]map[string]any, 0)
@@ -154,7 +192,7 @@ func queryReturnsRows(tx *sql.Tx, query string) ([]map[string]any, error) {
 			ptrs[i] = &values[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return nil, err
+			return queryOutput{}, err
 		}
 		row := make(map[string]any, len(columns))
 		for i, col := range columns {
@@ -168,13 +206,13 @@ func queryReturnsRows(tx *sql.Tx, query string) ([]map[string]any, error) {
 		results = append(results, row)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return queryOutput{}, err
 	}
 
-	return results, nil
+	return queryOutput{columns: columns, rows: results, jsonValue: results}, nil
 }
 
-func executeQuery(opts *connOpts, query string) any {
+func executeQuery(opts *connOpts, query string) queryOutput {
 	db, err := opts.open()
 	if err != nil {
 		fatal("%v", err)
@@ -215,7 +253,52 @@ func executeQuery(opts *connOpts, query string) any {
 		fatal("%v", err)
 	}
 
-	return response
+	return queryOutput{
+		columns:   []string{"rows_affected", "last_insert_id"},
+		rows:      []map[string]any{response},
+		jsonValue: response,
+	}
+}
+
+func valueString(v any) string {
+	if v == nil {
+		return ""
+	}
+	return fmt.Sprint(v)
+}
+
+func writeDelimitedOutput(w io.Writer, result queryOutput, comma rune) error {
+	cw := csv.NewWriter(w)
+	cw.Comma = comma
+	if err := cw.Write(result.columns); err != nil {
+		return err
+	}
+	for _, row := range result.rows {
+		record := make([]string, len(result.columns))
+		for i, col := range result.columns {
+			record[i] = valueString(row[col])
+		}
+		if err := cw.Write(record); err != nil {
+			return err
+		}
+	}
+	cw.Flush()
+	return cw.Error()
+}
+
+func writeOutput(w io.Writer, result queryOutput, format outputFormat) error {
+	switch format {
+	case outputJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result.jsonValue)
+	case outputCSV:
+		return writeDelimitedOutput(w, result, ',')
+	case outputTSV:
+		return writeDelimitedOutput(w, result, '\t')
+	default:
+		return fmt.Errorf("unknown output format %q", format)
+	}
 }
 
 func cmdExecute(args []string) {
@@ -224,17 +307,21 @@ func cmdExecute(args []string) {
 	var opts connOpts
 	addConnFlags(fs, &opts)
 	var dryRun bool
+	var csvOut, tsvOut bool
 	fs.BoolVar(&dryRun, "dry-run", false, "")
 	fs.BoolVar(&dryRun, "n", false, "")
+	addOutputFlags(fs, &csvOut, &tsvOut)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stdout, "Usage: mmysql execute [options] <query>\n")
 		fmt.Fprintf(os.Stdout, "       mmysql ex [options] <query>\n\n")
 		fmt.Fprintf(os.Stdout, "Options:\n")
 		fmt.Fprintln(os.Stdout, connFlagsUsage())
 		fmt.Fprintf(os.Stdout, "  -n, --dry-run    Print SQL without executing\n")
+		fmt.Fprintln(os.Stdout, outputFlagsUsage())
 	}
 	fs.Parse(args)
 	opts.applyEnv()
+	format := selectedOutputFormat(csvOut, tsvOut)
 
 	query := readQuery(fs.Args(), "execute")
 	if dryRun {
@@ -242,9 +329,7 @@ func cmdExecute(args []string) {
 		return
 	}
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(executeQuery(&opts, query)); err != nil {
+	if err := writeOutput(os.Stdout, executeQuery(&opts, query), format); err != nil {
 		fatal("%v", err)
 	}
 }
@@ -425,7 +510,7 @@ func buildStatements(table string, rows []map[string]any, ignore bool, upsert bo
 	return stmts
 }
 
-func execStatements(opts *connOpts, stmts []stmtInfo, dryRun bool) {
+func execStatements(opts *connOpts, stmts []stmtInfo, dryRun bool, format outputFormat) {
 	if dryRun {
 		for _, s := range stmts {
 			fmt.Printf("%s;\n", interpolateSQL(s.sql, s.vals))
@@ -459,9 +544,14 @@ func execStatements(opts *connOpts, stmts []stmtInfo, dryRun bool) {
 		fatal("%v", err)
 	}
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	enc.Encode(map[string]any{"rows_affected": totalAffected})
+	response := map[string]any{"rows_affected": totalAffected}
+	if err := writeOutput(os.Stdout, queryOutput{
+		columns:   []string{"rows_affected"},
+		rows:      []map[string]any{response},
+		jsonValue: response,
+	}, format); err != nil {
+		fatal("%v", err)
+	}
 }
 
 func cmdInsert(args []string) {
@@ -470,23 +560,27 @@ func cmdInsert(args []string) {
 	var opts connOpts
 	addConnFlags(fs, &opts)
 	var ignore, dryRun bool
+	var csvOut, tsvOut bool
 	fs.BoolVar(&ignore, "ignore", false, "")
 	fs.BoolVar(&ignore, "I", false, "")
 	fs.BoolVar(&dryRun, "dry-run", false, "")
 	fs.BoolVar(&dryRun, "n", false, "")
+	addOutputFlags(fs, &csvOut, &tsvOut)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stdout, "Usage: mmysql insert [options] <table> [json string]\n\n")
 		fmt.Fprintf(os.Stdout, "Options:\n")
 		fmt.Fprintln(os.Stdout, connFlagsUsage())
 		fmt.Fprintf(os.Stdout, "  -I, --ignore     Use INSERT IGNORE\n")
 		fmt.Fprintf(os.Stdout, "  -n, --dry-run    Print SQL without executing\n")
+		fmt.Fprintln(os.Stdout, outputFlagsUsage())
 	}
 	fs.Parse(args)
 	opts.applyEnv()
+	format := selectedOutputFormat(csvOut, tsvOut)
 
 	table, rows := parseTableAndJSON("insert", fs.Args())
 	stmts := buildStatements(table, rows, ignore, false)
-	execStatements(&opts, stmts, dryRun)
+	execStatements(&opts, stmts, dryRun, format)
 }
 
 type stringSlice []string
@@ -583,10 +677,12 @@ func cmdUpdate(args []string) {
 	var opts connOpts
 	addConnFlags(fs, &opts)
 	var dryRun bool
+	var csvOut, tsvOut bool
 	var keys stringSlice
 	var whereExpr string
 	fs.BoolVar(&dryRun, "dry-run", false, "")
 	fs.BoolVar(&dryRun, "n", false, "")
+	addOutputFlags(fs, &csvOut, &tsvOut)
 	fs.Var(&keys, "k", "")
 	fs.Var(&keys, "key", "")
 	fs.StringVar(&whereExpr, "where", "", "")
@@ -597,9 +693,11 @@ func cmdUpdate(args []string) {
 		fmt.Fprintf(os.Stdout, "  -k, --key        Key column for WHERE match (repeatable, required)\n")
 		fmt.Fprintf(os.Stdout, "      --where      Additional WHERE condition (use ~col for row values)\n")
 		fmt.Fprintf(os.Stdout, "  -n, --dry-run    Print SQL without executing\n")
+		fmt.Fprintln(os.Stdout, outputFlagsUsage())
 	}
 	fs.Parse(args)
 	opts.applyEnv()
+	format := selectedOutputFormat(csvOut, tsvOut)
 
 	if len(keys) == 0 {
 		fatal("at least one -k/--key flag is required")
@@ -616,7 +714,7 @@ func cmdUpdate(args []string) {
 	if err != nil {
 		fatal("%v", err)
 	}
-	execStatements(&opts, stmts, dryRun)
+	execStatements(&opts, stmts, dryRun, format)
 }
 
 func cmdUpsert(args []string) {
@@ -625,18 +723,22 @@ func cmdUpsert(args []string) {
 	var opts connOpts
 	addConnFlags(fs, &opts)
 	var dryRun bool
+	var csvOut, tsvOut bool
 	fs.BoolVar(&dryRun, "dry-run", false, "")
 	fs.BoolVar(&dryRun, "n", false, "")
+	addOutputFlags(fs, &csvOut, &tsvOut)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stdout, "Usage: mmysql upsert [options] <table> [json string]\n\n")
 		fmt.Fprintf(os.Stdout, "Options:\n")
 		fmt.Fprintln(os.Stdout, connFlagsUsage())
 		fmt.Fprintf(os.Stdout, "  -n, --dry-run    Print SQL without executing\n")
+		fmt.Fprintln(os.Stdout, outputFlagsUsage())
 	}
 	fs.Parse(args)
 	opts.applyEnv()
+	format := selectedOutputFormat(csvOut, tsvOut)
 
 	table, rows := parseTableAndJSON("upsert", fs.Args())
 	stmts := buildStatements(table, rows, false, true)
-	execStatements(&opts, stmts, dryRun)
+	execStatements(&opts, stmts, dryRun, format)
 }
