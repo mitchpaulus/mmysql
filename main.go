@@ -432,7 +432,10 @@ func quoteTable(name string) string {
 }
 
 func buildStatements(table string, rows []map[string]any, ignore bool, upsert bool) []stmtInfo {
-	const chunkSize = 1000
+	// MySQL caps prepared statements at 65,535 placeholders (error 1390),
+	// so the row chunk size must shrink as column count grows.
+	const maxPlaceholders = 60000
+	const maxRowsPerChunk = 1000
 
 	type keyGroup struct {
 		cols []string
@@ -476,6 +479,14 @@ func buildStatements(table string, rows []map[string]any, ignore bool, upsert bo
 				updates[j] = fmt.Sprintf("%s=VALUES(%s)", c, c)
 			}
 			upsertClause = " ON DUPLICATE KEY UPDATE " + strings.Join(updates, ", ")
+		}
+
+		chunkSize := maxRowsPerChunk
+		if byPlaceholders := maxPlaceholders / len(g.cols); byPlaceholders < chunkSize {
+			chunkSize = byPlaceholders
+		}
+		if chunkSize < 1 {
+			chunkSize = 1
 		}
 
 		for i := 0; i < len(g.rows); i += chunkSize {
