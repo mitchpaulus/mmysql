@@ -109,6 +109,9 @@ func fatal(format string, args ...any) {
 	os.Exit(1)
 }
 
+// version is set at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 func printMainUsage(w io.Writer) {
 	fmt.Fprintf(w, "Usage: mmysql <command> [options]\n\n")
 	fmt.Fprintf(w, "Commands:\n")
@@ -117,6 +120,7 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprintf(w, "  insert    Insert JSON data into a table\n")
 	fmt.Fprintf(w, "  upsert    Insert or update JSON data in a table\n")
 	fmt.Fprintf(w, "  update    Update rows matching key columns\n")
+	fmt.Fprintf(w, "  version   Print version and exit\n")
 }
 
 func main() {
@@ -133,6 +137,9 @@ func main() {
 			return
 		case "update":
 			cmdUpdate(os.Args[2:])
+			return
+		case "version", "--version", "-v":
+			fmt.Println(version)
 			return
 		}
 	}
