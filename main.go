@@ -19,6 +19,9 @@ type connOpts struct {
 	password string
 	host     string
 	database string
+
+	// source records where each value came from ("flag", "env", or "default").
+	source map[string]string
 }
 
 type outputFormat string
@@ -47,21 +50,27 @@ func addConnFlags(fs *flag.FlagSet, opts *connOpts) {
 }
 
 func (o *connOpts) applyEnv() {
-	if o.user == "" {
-		o.user = os.Getenv("MMYSQLUSER")
+	o.source = map[string]string{}
+	apply := func(name string, field *string, envVar string) {
+		if *field != "" {
+			o.source[name] = "flag"
+			return
+		}
+		if v, ok := os.LookupEnv(envVar); ok && v != "" {
+			*field = v
+			o.source[name] = "env " + envVar
+			return
+		}
+		o.source[name] = "default"
 	}
-	if o.password == "" {
-		o.password = os.Getenv("MMYSQLPASSWORD")
-	}
-	if o.host == "" {
-		o.host = os.Getenv("MMYSQLHOST")
-	}
-	if o.database == "" {
-		o.database = os.Getenv("MMYSQLDATABASE")
-	}
+	apply("user", &o.user, "MMYSQLUSER")
+	apply("password", &o.password, "MMYSQLPASSWORD")
+	apply("host", &o.host, "MMYSQLHOST")
+	apply("database", &o.database, "MMYSQLDATABASE")
 }
 
-func (o *connOpts) open() (*sql.DB, error) {
+// addr returns the host:port the connection will dial.
+func (o *connOpts) addr() string {
 	host := o.host
 	if host == "" {
 		host = "localhost"
@@ -69,8 +78,12 @@ func (o *connOpts) open() (*sql.DB, error) {
 	if !strings.Contains(host, ":") {
 		host = host + ":3306"
 	}
+	return host
+}
+
+func (o *connOpts) open() (*sql.DB, error) {
 	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?charset=utf8mb4&collation=utf8mb4_unicode_ci&parseTime=true",
-		o.user, o.password, host, o.database)
+		o.user, o.password, o.addr(), o.database)
 	return sql.Open("mysql", dsn)
 }
 
@@ -120,6 +133,7 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprintf(w, "  insert    Insert JSON data into a table\n")
 	fmt.Fprintf(w, "  upsert    Insert or update JSON data in a table\n")
 	fmt.Fprintf(w, "  update    Update rows matching key columns\n")
+	fmt.Fprintf(w, "  check     Test the connection and report diagnostics\n")
 	fmt.Fprintf(w, "  version   Print version and exit\n")
 }
 
@@ -137,6 +151,9 @@ func main() {
 			return
 		case "update":
 			cmdUpdate(os.Args[2:])
+			return
+		case "check":
+			cmdCheck(os.Args[2:])
 			return
 		case "version", "--version", "-v":
 			fmt.Println(version)

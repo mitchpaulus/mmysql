@@ -40,6 +40,7 @@ Commands:
   insert    Insert JSON data into a table
   upsert    Insert or update JSON data in a table
   update    Update rows matching key columns
+  check     Test the connection and report diagnostics
   version   Print version and exit
 ```
 
@@ -61,6 +62,32 @@ mmysql ex "SELECT id, name FROM users LIMIT 5"
 mmysql ex --csv "SELECT * FROM orders" > orders.csv
 echo '{"id": 1, "name": "Ada"}' | mmysql insert users
 ```
+
+## Troubleshooting
+
+`mmysql check` tests the connection in stages and stops at the first one that fails,
+with a hint about the likely cause. It prints where each setting came from (flag or
+environment variable) and the password's length, but never the password itself.
+
+```
+$ mmysql check
+Settings:
+  user:      slee  [env MMYSQLUSER]
+  password:  set, 12 chars  [env MMYSQLPASSWORD]
+  host:      db.example.com:3306  [env MMYSQLHOST]
+  database:  reports  [env MMYSQLDATABASE]
+
+DNS:       ok    db.example.com -> 203.0.113.10 (12ms)
+TCP:       ok    connected to db.example.com:3306 (40ms)
+Login:     FAIL  Error 1045 (28000): Access denied for user 'slee'@'client.example.net' (using password: YES)
+           hint: the server was reached and an account matched user "slee" from this client's address,
+           but the password did not match. Network and firewall are fine.
+           ...
+```
+
+Pass `--fingerprint` to also print the first eight hex characters of the password's SHA-256 hash,
+so two people can confirm they hold the same value without sharing it. The command exits non-zero
+on any failure, so it can be used in scripts.
 
 ## License
 
