@@ -180,6 +180,15 @@ func checkLogin(o *connOpts) bool {
 	fmt.Printf("Server:    %s\n", version)
 	fmt.Printf("Session:   connected as %s, matched account %s\n", sessionUser, currentUser)
 
+	var name, cipher string
+	if err := db.QueryRowContext(ctx, "SHOW SESSION STATUS LIKE 'Ssl_cipher'").Scan(&name, &cipher); err == nil {
+		if cipher != "" {
+			fmt.Printf("TLS:       on    %s\n", cipher)
+		} else {
+			fmt.Printf("TLS:       off   server does not offer TLS; traffic is unencrypted\n")
+		}
+	}
+
 	if o.database != "" {
 		var dbName *string
 		if err := db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&dbName); err == nil && dbName != nil {
@@ -203,10 +212,12 @@ func printLoginHint(err error, o *connOpts) {
 	switch merr.Number {
 	case 1045:
 		p("hint: the server was reached and an account matched user %q from this client's address,", o.user)
-		p("but the password did not match. Network and firewall are fine.")
-		p("Compare the password length above with what you expect. Common causes are a stale")
-		p("MMYSQLPASSWORD in the environment, shell expansion of special characters, or a")
-		p("trailing space from copy and paste. Run with --fingerprint to compare values safely.")
+		p("but the login was rejected. Network and firewall are fine. Two causes give this exact error:")
+		p("  1. The password does not match. Compare the length above with what you expect. Common")
+		p("     causes are a stale MMYSQLPASSWORD in the environment, shell expansion of special")
+		p("     characters, or a trailing space. Run with --fingerprint to compare values safely.")
+		p("  2. The account has REQUIRE SSL or X509 and the server did not offer TLS, or the")
+		p("     account requires a client certificate. Check with SHOW CREATE USER '%s'@'%%';", o.user)
 	case 1130:
 		p("hint: the server accepted the connection but no account for user %q allows this", o.user)
 		p("client address. A DBA needs to create or grant 'user'@'%%' or 'user'@'<your-ip>'.")

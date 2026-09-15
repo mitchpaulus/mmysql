@@ -54,6 +54,7 @@ Connection settings come from environment variables and can be overridden with f
 | `-d`, `--database` | `MMYSQLDATABASE`     |
 
 The host defaults to `localhost` and the port to `3306`. All connections use `utf8mb4`.
+Connections are encrypted with TLS whenever the server supports it, and fall back to plain TCP otherwise. Server certificates are not verified.
 
 Output is JSON by default. Pass `--csv` or `--tsv` for delimited output instead.
 

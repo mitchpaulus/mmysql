@@ -20,7 +20,8 @@ output over chat.
    1045 password mismatch, 1130 host not allowed, 1044/1049 database problems,
    1251/2059 auth plugin, 3159 TLS required.
 5. **Server.** On success print the version, `USER()` versus `CURRENT_USER()` so the user
-   can see which account pattern matched, and the selected database.
+   can see which account pattern matched, whether TLS is in use and with which cipher,
+   and the selected database.
 
 ## Non-goals
 

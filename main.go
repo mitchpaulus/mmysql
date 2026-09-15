@@ -82,7 +82,10 @@ func (o *connOpts) addr() string {
 }
 
 func (o *connOpts) open() (*sql.DB, error) {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?charset=utf8mb4&collation=utf8mb4_unicode_ci&parseTime=true",
+	// tls=preferred encrypts the connection whenever the server supports it and
+	// falls back to plain TCP otherwise. Certificates are not verified because
+	// most MySQL servers use self-signed auto-generated ones.
+	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?charset=utf8mb4&collation=utf8mb4_unicode_ci&parseTime=true&tls=preferred",
 		o.user, o.password, o.addr(), o.database)
 	return sql.Open("mysql", dsn)
 }
