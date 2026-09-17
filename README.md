@@ -56,7 +56,7 @@ Connection settings come from environment variables and can be overridden with f
 The host defaults to `localhost` and the port to `3306`. All connections use `utf8mb4`.
 Connections are encrypted with TLS whenever the server supports it, and fall back to plain TCP otherwise. Server certificates are not verified.
 
-Output is JSON by default. Pass `--csv` or `--tsv` for delimited output instead.
+Output is JSON by default. Pass `--csv` or `--tsv` for delimited output instead. Add `-N`/`--no-header` to omit the header row.
 
 ```sh
 mmysql ex "SELECT id, name FROM users LIMIT 5"
