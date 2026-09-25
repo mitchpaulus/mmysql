@@ -58,10 +58,13 @@ Connections are encrypted with TLS whenever the server supports it, and fall bac
 
 Output is JSON by default. Pass `--csv` or `--tsv` for delimited output instead. Add `-N`/`--no-header` to omit the header row.
 
+Input from stdin is read as UTF-8. If it is in another encoding, name it with `--encoding`. Any [WHATWG encoding label](https://encoding.spec.whatwg.org/#names-and-labels) works, such as `windows-1252`, `utf-16le`, or `shift_jis`. A leading byte order mark is ignored. Run `mmysql --list-encodings` to see them all.
+
 ```sh
 mmysql ex "SELECT id, name FROM users LIMIT 5"
 mmysql ex --csv "SELECT * FROM orders" > orders.csv
 echo '{"id": 1, "name": "Ada"}' | mmysql insert users
+mmysql ex --encoding windows-1252 < legacy.sql
 ```
 
 ## Troubleshooting

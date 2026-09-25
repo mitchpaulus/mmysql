@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	_ "github.com/go-sql-driver/mysql"
+	"golang.org/x/text/encoding/htmlindex"
 )
 
 type connOpts struct {
@@ -129,6 +130,105 @@ func (o outputOpts) format() outputFormat {
 	return outputJSON
 }
 
+func addEncodingFlag(fs *flag.FlagSet, encoding *string) {
+	fs.Func("encoding", "", func(name string) error {
+		if _, err := htmlindex.Get(name); err != nil {
+			fmt.Fprintf(os.Stderr, "error: unknown encoding %q\n\n", name)
+			printEncodings(os.Stderr)
+			os.Exit(1)
+		}
+		*encoding = name
+		return nil
+	})
+	addListEncodingsFlag(fs)
+}
+
+// addListEncodingsFlag registers --list-encodings, which prints the encoding
+// table and exits as soon as the flag is parsed.
+func addListEncodingsFlag(fs *flag.FlagSet) {
+	fs.BoolFunc("list-encodings", "", func(string) error {
+		printEncodings(os.Stdout)
+		os.Exit(0)
+		return nil
+	})
+}
+
+// encodingNamesURL lists every name accepted by --encoding.
+const encodingNamesURL = "https://encoding.spec.whatwg.org/#names-and-labels"
+
+func encodingFlagUsage() string {
+	return `      --encoding   Text encoding of stdin, e.g. windows-1252, utf-16le (default: utf-8)
+      --list-encodings
+                   Print all supported encodings and exit`
+}
+
+// encodingGroups holds the canonical name of every encoding htmlindex supports.
+var encodingGroups = []struct {
+	group string
+	names []string
+}{
+	{"Unicode", []string{"utf-8", "utf-16le", "utf-16be"}},
+	{"ISO-8859", []string{"iso-8859-2", "iso-8859-3", "iso-8859-4", "iso-8859-5", "iso-8859-6", "iso-8859-7", "iso-8859-8", "iso-8859-8-i", "iso-8859-10", "iso-8859-13", "iso-8859-14", "iso-8859-15", "iso-8859-16"}},
+	{"Windows", []string{"windows-874", "windows-1250", "windows-1251", "windows-1252", "windows-1253", "windows-1254", "windows-1255", "windows-1256", "windows-1257", "windows-1258"}},
+	{"Other single-byte", []string{"ibm866", "koi8-r", "koi8-u", "macintosh", "x-mac-cyrillic"}},
+	{"Chinese", []string{"gbk", "gb18030", "big5"}},
+	{"Japanese", []string{"euc-jp", "iso-2022-jp", "shift_jis"}},
+	{"Korean", []string{"euc-kr"}},
+	{"Special", []string{"replacement", "x-user-defined"}},
+}
+
+// printEncodings writes encodingGroups as a two-column table, wrapping long
+// name lists so each line stays under 80 characters.
+func printEncodings(w io.Writer) {
+	const groupWidth = 19
+	const maxWidth = 80
+	fmt.Fprintln(w, "Supported encodings:")
+	fmt.Fprintln(w)
+	for _, g := range encodingGroups {
+		line := fmt.Sprintf("  %-*s", groupWidth, g.group)
+		lineHasName := false
+		for i, name := range g.names {
+			item := name
+			if i < len(g.names)-1 {
+				item += ","
+			}
+			if lineHasName && len(line)+1+len(item) > maxWidth {
+				fmt.Fprintln(w, line)
+				line = strings.Repeat(" ", 2+groupWidth)
+				lineHasName = false
+			}
+			if lineHasName {
+				line += " "
+			}
+			line += item
+			lineHasName = true
+		}
+		fmt.Fprintln(w, line)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Aliases such as latin1 are also accepted. Full list:")
+	fmt.Fprintln(w, "  "+encodingNamesURL)
+}
+
+// readStdinText reads all of stdin and decodes it to UTF-8 from the named
+// encoding, which addEncodingFlag has already validated. An empty name means
+// the input is already UTF-8. A leading byte order mark is removed.
+func readStdinText(encoding string) (string, error) {
+	var r io.Reader = os.Stdin
+	if encoding != "" {
+		enc, err := htmlindex.Get(encoding)
+		if err != nil {
+			return "", err
+		}
+		r = enc.NewDecoder().Reader(r)
+	}
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimPrefix(string(b), "\uFEFF"), nil
+}
+
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
 	os.Exit(1)
@@ -146,7 +246,9 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprintf(w, "  upsert    Insert or update JSON data in a table\n")
 	fmt.Fprintf(w, "  update    Update rows matching key columns\n")
 	fmt.Fprintf(w, "  check     Test the connection and report diagnostics\n")
-	fmt.Fprintf(w, "  version   Print version and exit\n")
+	fmt.Fprintf(w, "  version   Print version and exit\n\n")
+	fmt.Fprintf(w, "Options:\n")
+	fmt.Fprintf(w, "  --list-encodings  Print all supported --encoding values and exit\n")
 }
 
 func main() {
@@ -167,6 +269,9 @@ func main() {
 		case "check":
 			cmdCheck(os.Args[2:])
 			return
+		case "--list-encodings":
+			printEncodings(os.Stdout)
+			return
 		case "version", "--version", "-v":
 			fmt.Println(version)
 			return
@@ -177,7 +282,7 @@ func main() {
 	os.Exit(1)
 }
 
-func readQuery(args []string, usageName string) string {
+func readQuery(args []string, usageName string, encoding string) string {
 	if len(args) > 0 {
 		query := strings.TrimSpace(strings.Join(args, " "))
 		if query == "" {
@@ -197,11 +302,11 @@ func readQuery(args []string, usageName string) string {
 		os.Exit(1)
 	}
 
-	b, err := io.ReadAll(os.Stdin)
+	text, err := readStdinText(encoding)
 	if err != nil {
 		fatal("reading stdin: %v", err)
 	}
-	query := strings.TrimSpace(string(b))
+	query := strings.TrimSpace(text)
 	if query == "" {
 		fatal("empty query from stdin")
 	}
@@ -347,21 +452,24 @@ func cmdExecute(args []string) {
 	addConnFlags(fs, &opts)
 	var dryRun bool
 	var out outputOpts
+	var encoding string
 	fs.BoolVar(&dryRun, "dry-run", false, "")
 	fs.BoolVar(&dryRun, "n", false, "")
 	addOutputFlags(fs, &out)
+	addEncodingFlag(fs, &encoding)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stdout, "Usage: mmysql execute [options] <query>\n")
 		fmt.Fprintf(os.Stdout, "       mmysql ex [options] <query>\n\n")
 		fmt.Fprintf(os.Stdout, "Options:\n")
 		fmt.Fprintln(os.Stdout, connFlagsUsage())
 		fmt.Fprintf(os.Stdout, "  -n, --dry-run    Print SQL without executing\n")
+		fmt.Fprintln(os.Stdout, encodingFlagUsage())
 		fmt.Fprintln(os.Stdout, outputFlagsUsage())
 	}
 	fs.Parse(args)
 	opts.applyEnv()
 
-	query := readQuery(fs.Args(), "execute")
+	query := readQuery(fs.Args(), "execute", encoding)
 	if dryRun {
 		fmt.Println(query)
 		return
@@ -406,7 +514,7 @@ func interpolateSQL(query string, vals []any) string {
 
 // parseJSONRows reads a table name and JSON data from args/stdin,
 // returning the table name and parsed rows.
-func parseTableAndJSON(cmdName string, args []string) (string, []map[string]any) {
+func parseTableAndJSON(cmdName string, args []string, encoding string) (string, []map[string]any) {
 	if len(args) == 0 {
 		fatal("table name required\nusage: mmysql %s [options] <table> [json string]", cmdName)
 	}
@@ -424,11 +532,11 @@ func parseTableAndJSON(cmdName string, args []string) (string, []map[string]any)
 			fmt.Fprintf(os.Stderr, "       echo '{\"col\":\"val\"}' | mmysql %s [options] <table>\n", cmdName)
 			os.Exit(1)
 		}
-		b, err := io.ReadAll(os.Stdin)
+		text, err := readStdinText(encoding)
 		if err != nil {
 			fatal("reading stdin: %v", err)
 		}
-		jsonData = strings.TrimSpace(string(b))
+		jsonData = strings.TrimSpace(text)
 		if jsonData == "" {
 			fatal("empty JSON from stdin")
 		}
@@ -610,23 +718,26 @@ func cmdInsert(args []string) {
 	addConnFlags(fs, &opts)
 	var ignore, dryRun bool
 	var out outputOpts
+	var encoding string
 	fs.BoolVar(&ignore, "ignore", false, "")
 	fs.BoolVar(&ignore, "I", false, "")
 	fs.BoolVar(&dryRun, "dry-run", false, "")
 	fs.BoolVar(&dryRun, "n", false, "")
 	addOutputFlags(fs, &out)
+	addEncodingFlag(fs, &encoding)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stdout, "Usage: mmysql insert [options] <table> [json string]\n\n")
 		fmt.Fprintf(os.Stdout, "Options:\n")
 		fmt.Fprintln(os.Stdout, connFlagsUsage())
 		fmt.Fprintf(os.Stdout, "  -I, --ignore     Use INSERT IGNORE\n")
 		fmt.Fprintf(os.Stdout, "  -n, --dry-run    Print SQL without executing\n")
+		fmt.Fprintln(os.Stdout, encodingFlagUsage())
 		fmt.Fprintln(os.Stdout, outputFlagsUsage())
 	}
 	fs.Parse(args)
 	opts.applyEnv()
 
-	table, rows := parseTableAndJSON("insert", fs.Args())
+	table, rows := parseTableAndJSON("insert", fs.Args(), encoding)
 	stmts := buildStatements(table, rows, ignore, false)
 	execStatements(&opts, stmts, dryRun, out)
 }
@@ -726,11 +837,13 @@ func cmdUpdate(args []string) {
 	addConnFlags(fs, &opts)
 	var dryRun bool
 	var out outputOpts
+	var encoding string
 	var keys stringSlice
 	var whereExpr string
 	fs.BoolVar(&dryRun, "dry-run", false, "")
 	fs.BoolVar(&dryRun, "n", false, "")
 	addOutputFlags(fs, &out)
+	addEncodingFlag(fs, &encoding)
 	fs.Var(&keys, "k", "")
 	fs.Var(&keys, "key", "")
 	fs.StringVar(&whereExpr, "where", "", "")
@@ -741,6 +854,7 @@ func cmdUpdate(args []string) {
 		fmt.Fprintf(os.Stdout, "  -k, --key        Key column for WHERE match (repeatable, required)\n")
 		fmt.Fprintf(os.Stdout, "      --where      Additional WHERE condition (use ~col for row values)\n")
 		fmt.Fprintf(os.Stdout, "  -n, --dry-run    Print SQL without executing\n")
+		fmt.Fprintln(os.Stdout, encodingFlagUsage())
 		fmt.Fprintln(os.Stdout, outputFlagsUsage())
 	}
 	fs.Parse(args)
@@ -756,7 +870,7 @@ func cmdUpdate(args []string) {
 		whereSQL, whereParamCols = parseWhere(whereExpr)
 	}
 
-	table, rows := parseTableAndJSON("update", fs.Args())
+	table, rows := parseTableAndJSON("update", fs.Args(), encoding)
 	stmts, err := buildUpdateStatements(table, keys, whereSQL, whereParamCols, rows)
 	if err != nil {
 		fatal("%v", err)
@@ -771,20 +885,23 @@ func cmdUpsert(args []string) {
 	addConnFlags(fs, &opts)
 	var dryRun bool
 	var out outputOpts
+	var encoding string
 	fs.BoolVar(&dryRun, "dry-run", false, "")
 	fs.BoolVar(&dryRun, "n", false, "")
 	addOutputFlags(fs, &out)
+	addEncodingFlag(fs, &encoding)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stdout, "Usage: mmysql upsert [options] <table> [json string]\n\n")
 		fmt.Fprintf(os.Stdout, "Options:\n")
 		fmt.Fprintln(os.Stdout, connFlagsUsage())
 		fmt.Fprintf(os.Stdout, "  -n, --dry-run    Print SQL without executing\n")
+		fmt.Fprintln(os.Stdout, encodingFlagUsage())
 		fmt.Fprintln(os.Stdout, outputFlagsUsage())
 	}
 	fs.Parse(args)
 	opts.applyEnv()
 
-	table, rows := parseTableAndJSON("upsert", fs.Args())
+	table, rows := parseTableAndJSON("upsert", fs.Args(), encoding)
 	stmts := buildStatements(table, rows, false, true)
 	execStatements(&opts, stmts, dryRun, out)
 }

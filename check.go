@@ -26,6 +26,7 @@ func cmdCheck(args []string) {
 	addConnFlags(fs, &opts)
 	var fingerprint bool
 	fs.BoolVar(&fingerprint, "fingerprint", false, "")
+	addListEncodingsFlag(fs)
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stdout, "Usage: mmysql check [options]\n\n")
 		fmt.Fprintf(os.Stdout, "Tests the connection in stages (settings, DNS, TCP, login) and prints\n")
@@ -34,6 +35,8 @@ func cmdCheck(args []string) {
 		fmt.Fprintln(os.Stdout, connFlagsUsage())
 		fmt.Fprintf(os.Stdout, "      --fingerprint  Also print a short SHA-256 prefix of the password\n")
 		fmt.Fprintf(os.Stdout, "                     so two people can confirm they hold the same value\n")
+		fmt.Fprintf(os.Stdout, "      --list-encodings\n")
+		fmt.Fprintf(os.Stdout, "                     Print all supported encodings and exit\n")
 	}
 	fs.Parse(args)
 	opts.applyEnv()
